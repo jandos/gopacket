@@ -260,7 +260,7 @@ func (p *page) length() int {
 	return len(p.bytes)
 }
 func (p *page) release(pc *pageCache) int {
-	pc.replace(p)
+	pc.release(p)
 	return 1
 }
 func (p *page) isStart() bool {
@@ -594,7 +594,7 @@ func NewAssembler(pool *StreamPool) *Assembler {
 // Dump returns a short string describing the page usage of the Assembler
 func (a *Assembler) Dump() string {
 	s := ""
-	s += fmt.Sprintf("pageCache: used: %d, size: %d, free: %d", a.pc.used, a.pc.size, len(a.pc.free))
+	s += fmt.Sprintf("pageCache: used: %d, free: %d", a.pc.used, len(a.pc.free))
 	return s
 }
 
@@ -1202,7 +1202,7 @@ func (a *Assembler) closeHalfConnection(conn *connection, half *halfconnection) 
 	half.closed = true
 	for p := half.first; p != nil; p = p.next {
 		// FIXME: it should be already empty
-		a.pc.replace(p)
+		a.pc.release(p)
 		half.pages--
 	}
 	if conn.s2c.closed && conn.c2s.closed {

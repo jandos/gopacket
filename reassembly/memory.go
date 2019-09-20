@@ -8,6 +8,7 @@ package reassembly
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -74,12 +75,11 @@ func (c *pageCache) grow() {
 		// put page block to appropriate list
 		block.next = c.blockListMap[pageBlockSize].next
 		c.blockListMap[pageBlockSize].next = block
-		c.blockListMap[pageBlockSize].count++
 	}
 
 	c.minIdx = pageBlockSize
-
 	c.size += c.pcSize * pageBlockSize
+	c.blockListMap[pageBlockSize].count += c.pcSize
 
 	if *memLog {
 		log.Println("PageCache: created", c.pcSize, "new pages, size:", c.size)
@@ -99,7 +99,7 @@ func (c *pageCache) tryShrink() {
 		min = 1
 	}
 
-	// TODO need to take into account all other blocks
+	// TODO need to take into account non-full blocks
 	if c.blockListMap[pageBlockSize].count <= min {
 		return
 	}
@@ -117,6 +117,7 @@ func (c *pageCache) tryShrink() {
 		cur = next
 	}
 
+	c.blockListMap[pageBlockSize].count -= freed - 1
 	c.size -= (freed - 1) * pageBlockSize
 	c.pcSize = min
 }
@@ -134,9 +135,9 @@ func (c *pageCache) next(ts time.Time) (p *page) {
 	}
 
 	block := c.blockListMap[c.minIdx].next
-	// if block == nil {
-	// 	panic(fmt.Sprintf("minIdx: %v, count: %v", c.minIdx, c.blockListMap[c.minIdx].count))
-	// }
+	if block == nil {
+		panic(fmt.Sprintf("minIdx: %v, count: %v", c.minIdx, c.blockListMap[c.minIdx].count))
+	}
 
 	// move block lower
 	c.blockListMap[c.minIdx].next = block.next

@@ -110,15 +110,15 @@ func (c *pageCache) tryShrink() {
 	}
 
 	freed := 0
-	for cur != nil {
+	for cur.next != nil {
 		next := cur.next
 		cur.next = nil
 		freed++
 		cur = next
 	}
 
-	c.blockListMap[pageBlockSize].count -= freed - 1
-	c.size -= (freed - 1) * pageBlockSize
+	c.blockListMap[pageBlockSize].count -= freed
+	c.size -= freed * pageBlockSize
 	c.pcSize = min
 }
 
@@ -130,30 +130,34 @@ func (c *pageCache) next(ts time.Time) (p *page) {
 			log.Println("PageCache:", c.pageRequests, "requested,", c.used, "used")
 		}
 	}
-	if c.minIdx == 0 {
-		c.grow()
-	}
 
-	block := c.blockListMap[c.minIdx].next
+	idx := c.minIdx
+
+	block := c.blockListMap[idx].next
 	if block == nil {
-		panic(fmt.Sprintf("minIdx: %v, count: %v", c.minIdx, c.blockListMap[c.minIdx].count))
+		panic(fmt.Sprintf("memblock error: idx=%v, count=%v", idx, c.blockListMap[idx].count))
 	}
 
 	// move block lower
-	c.blockListMap[c.minIdx].next = block.next
-	block.next = c.blockListMap[c.minIdx-1].next
-	c.blockListMap[c.minIdx-1].next = block
+	c.blockListMap[idx].next = block.next
+	block.next = c.blockListMap[idx-1].next
+	c.blockListMap[idx-1].next = block
 	// update counters
-	c.blockListMap[c.minIdx].count--
-	c.blockListMap[c.minIdx-1].count++
+	c.blockListMap[idx].count--
+	c.blockListMap[idx-1].count++
 	// update minimum index of bucket which contains blocks
-	c.minIdx--
+	c.minIdx = idx - 1
 	if c.minIdx == 0 {
 		for i := 1; i < len(c.blockListMap); i++ {
 			if c.blockListMap[i].count > 0 {
 				c.minIdx = i
 				break
 			}
+		}
+
+		// no free blocks, need to allocate
+		if c.minIdx == 0 {
+			c.grow()
 		}
 	}
 

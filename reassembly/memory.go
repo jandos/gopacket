@@ -21,8 +21,8 @@ var memLog = flag.Bool("assembly_memuse_log", defaultDebug, "If true, the github
 const pageBlockSize = 1024
 
 type pageBlock struct {
-	next *pageBlock
-	free []*page
+	next, prev *pageBlock
+	free       []*page
 
 	// used only in sentinel
 	count int
@@ -74,7 +74,11 @@ func (c *pageCache) grow() {
 
 		// put page block to appropriate list
 		block.next = c.blockListMap[pageBlockSize].next
+		if c.blockListMap[pageBlockSize].next != nil {
+			c.blockListMap[pageBlockSize].next.prev = block
+		}
 		c.blockListMap[pageBlockSize].next = block
+		block.prev = c.blockListMap[pageBlockSize]
 	}
 
 	c.minIdx = pageBlockSize
@@ -108,15 +112,9 @@ func (c *pageCache) tryShrink() {
 	for i := 0; i < min; i++ {
 		cur = cur.next
 	}
+	cur.next = nil
 
-	freed := 0
-	for cur.next != nil {
-		next := cur.next
-		cur.next = nil
-		freed++
-		cur = next
-	}
-
+	freed := c.blockListMap[pageBlockSize].count - min
 	c.blockListMap[pageBlockSize].count -= freed
 	c.size -= freed * pageBlockSize
 	c.pcSize = min
@@ -139,9 +137,16 @@ func (c *pageCache) next(ts time.Time) (p *page) {
 	}
 
 	// move block lower
-	c.blockListMap[idx].next = block.next
+	block.prev.next = block.next
+	if block.next != nil {
+		block.next.prev = block.prev
+	}
 	block.next = c.blockListMap[idx-1].next
+	if c.blockListMap[idx-1].next != nil {
+		c.blockListMap[idx-1].next.prev = block
+	}
 	c.blockListMap[idx-1].next = block
+	block.prev = c.blockListMap[idx-1]
 	// update counters
 	c.blockListMap[idx].count--
 	c.blockListMap[idx-1].count++
@@ -191,9 +196,16 @@ func (c *pageCache) replace(p *page) {
 
 	i := len(block.free)
 	// move block up
-	c.blockListMap[i-1].next = block.next
+	block.prev.next = block.next
+	if block.next != nil {
+		block.next.prev = block.prev
+	}
 	block.next = c.blockListMap[i].next
+	if c.blockListMap[i].next != nil {
+		c.blockListMap[i].next.prev = block
+	}
 	c.blockListMap[i].next = block
+	block.prev = c.blockListMap[i]
 	// update counters
 	c.blockListMap[i-1].count--
 	c.blockListMap[i].count++

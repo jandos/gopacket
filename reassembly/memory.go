@@ -17,14 +17,26 @@ import (
 
 var memLog = flag.Bool("assembly_memuse_log", defaultDebug, "If true, the github.com/google/gopacket/reassembly library will log information regarding its memory use every once in a while.")
 
+const pageBlockSize = 1024
+
+type pageBlock struct {
+	next *pageBlock
+	free []*page
+
+	// used only in sentinel
+	count int
+}
+
 /*
  * pageCache
  */
 // pageCache is a concurrency-unsafe store of page objects we use to avoid
 // memory allocation as much as we can.
 type pageCache struct {
-	free         []*page
-	pcSize       int
+	// an array of pageBlock lists, where each bucket stores blocks based on their len(free)
+	blockListMap [pageBlockSize + 1]*pageBlock
+	minIdx       int // minimum index of bucket which contains blocks
+	pcSize       int // number of pageBlocks to allocate
 	size, used   int
 	pageRequests int64
 	ops          int
@@ -35,25 +47,45 @@ const initialAllocSize = 1024
 
 func newPageCache() *pageCache {
 	pc := &pageCache{
-		free:   make([]*page, 0, initialAllocSize),
-		pcSize: initialAllocSize,
+		pcSize: 1,
 	}
+
+	// initalize list roots
+	for i := 0; i <= pageBlockSize; i++ {
+		pc.blockListMap[i] = &pageBlock{}
+	}
+
 	pc.grow()
 	return pc
 }
 
 // grow exponentially increases the size of our page cache as much as necessary.
 func (c *pageCache) grow() {
-	pages := make([]page, c.pcSize)
-	c.size += c.pcSize
-	for i := range pages {
-		c.free = append(c.free, &pages[i])
+	for i := 0; i < c.pcSize; i++ {
+		// create a page block with new pages
+		block := &pageBlock{}
+		block.free = make([]*page, pageBlockSize)
+		pages := make([]page, pageBlockSize)
+		for j := 0; j < pageBlockSize; j++ {
+			pages[j].parent = block
+			block.free[j] = &pages[j]
+		}
+
+		// put page block to appropriate list
+		block.next = c.blockListMap[pageBlockSize].next
+		c.blockListMap[pageBlockSize].next = block
+		c.blockListMap[pageBlockSize].count++
 	}
+
+	c.minIdx = pageBlockSize
+
+	c.size += c.pcSize * pageBlockSize
+
 	if *memLog {
-		log.Println("PageCache: created", c.pcSize, "new pages, size:", c.size, "cap:", cap(c.free), "len:", len(c.free))
+		log.Println("PageCache: created", c.pcSize, "new pages, size:", c.size)
 	}
 	// control next shrink attempt
-	c.nextShrink = c.pcSize
+	c.nextShrink = c.pcSize * pageBlockSize
 	c.ops = 0
 	// prepare for next alloc
 	c.pcSize *= 2
@@ -63,17 +95,29 @@ func (c *pageCache) grow() {
 // Note: memory used by c.free itself it not collected.
 func (c *pageCache) tryShrink() {
 	var min = c.pcSize / 2
-	if min < initialAllocSize {
-		min = initialAllocSize
+	if min == 0 {
+		min = 1
 	}
-	if len(c.free) <= min {
+
+	// TODO need to take into account all other blocks
+	if c.blockListMap[pageBlockSize].count <= min {
 		return
 	}
-	for i := range c.free[min:] {
-		c.free[min+i] = nil
+
+	cur := c.blockListMap[pageBlockSize]
+	for i := 0; i < min; i++ {
+		cur = cur.next
 	}
-	c.size -= len(c.free) - min
-	c.free = c.free[:min]
+
+	freed := 0
+	for cur != nil {
+		next := cur.next
+		cur.next = nil
+		freed++
+		cur = next
+	}
+
+	c.size -= (freed - 1) * pageBlockSize
 	c.pcSize = min
 }
 
@@ -82,14 +126,38 @@ func (c *pageCache) next(ts time.Time) (p *page) {
 	if *memLog {
 		c.pageRequests++
 		if c.pageRequests&0xFFFF == 0 {
-			log.Println("PageCache:", c.pageRequests, "requested,", c.used, "used,", len(c.free), "free")
+			log.Println("PageCache:", c.pageRequests, "requested,", c.used, "used")
 		}
 	}
-	if len(c.free) == 0 {
+	if c.minIdx == 0 {
 		c.grow()
 	}
-	i := len(c.free) - 1
-	p, c.free = c.free[i], c.free[:i]
+
+	block := c.blockListMap[c.minIdx].next
+	// if block == nil {
+	// 	panic(fmt.Sprintf("minIdx: %v, count: %v", c.minIdx, c.blockListMap[c.minIdx].count))
+	// }
+
+	// move block lower
+	c.blockListMap[c.minIdx].next = block.next
+	block.next = c.blockListMap[c.minIdx-1].next
+	c.blockListMap[c.minIdx-1].next = block
+	// update counters
+	c.blockListMap[c.minIdx].count--
+	c.blockListMap[c.minIdx-1].count++
+	// update minimum index of bucket which contains blocks
+	c.minIdx--
+	if c.minIdx == 0 {
+		for i := 1; i < len(c.blockListMap); i++ {
+			if c.blockListMap[i].count > 0 {
+				c.minIdx = i
+				break
+			}
+		}
+	}
+
+	i := len(block.free) - 1
+	p, block.free = block.free[i], block.free[:i]
 	p.seen = ts
 	p.bytes = p.buf[:0]
 	c.used++
@@ -111,9 +179,23 @@ func (c *pageCache) replace(p *page) {
 	if *memLog {
 		log.Printf("replacing %s\n", p)
 	}
+	block := p.parent
 	p.prev = nil
 	p.next = nil
-	c.free = append(c.free, p)
+	block.free = append(block.free, p)
+
+	i := len(block.free)
+	// move block up
+	c.blockListMap[i-1].next = block.next
+	block.next = c.blockListMap[i].next
+	c.blockListMap[i].next = block
+	// update counters
+	c.blockListMap[i-1].count--
+	c.blockListMap[i].count++
+	// update minimum index of bucket which contains blocks
+	if c.blockListMap[c.minIdx].count == 0 || c.minIdx > i {
+		c.minIdx = i
+	}
 }
 
 /*

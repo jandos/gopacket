@@ -230,6 +230,7 @@ func (dir TCPFlowDirection) Reverse() TCPFlowDirection {
 // avoids memory allocation.  Used pages are stored in a doubly-linked list in
 // a connection.
 type page struct {
+	parent     *pageBlock
 	bytes      []byte
 	seq        Sequence
 	prev, next *page
@@ -595,7 +596,7 @@ func NewAssembler(pool *StreamPool) *Assembler {
 // Dump returns a short string describing the page usage of the Assembler
 func (a *Assembler) Dump() string {
 	s := ""
-	s += fmt.Sprintf("pageCache: used: %d, size: %d, free: %d", a.pc.used, a.pc.size, len(a.pc.free))
+	s += fmt.Sprintf("pageCache: used: %d, size: %d", a.pc.used, a.pc.size)
 	return s
 }
 

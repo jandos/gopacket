@@ -9,6 +9,7 @@ package reassembly
 import (
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net"
 	"reflect"
 	"runtime"
@@ -1704,6 +1705,66 @@ func TestMemoryShrink(t *testing.T) {
 	if after.HeapAlloc >= before.HeapAlloc {
 		t.Fatalf("Nothing freed for %d run: before: %d, after: %d", run, before.HeapAlloc, after.HeapAlloc)
 	}
+}
+
+func TestMemoryShrinkDemo(t *testing.T) {
+	// out of order packets which will be queued
+	tcp1 := layers.TCP{
+		SrcPort:   1,
+		DstPort:   2,
+		Seq:       999,
+		BaseLayer: layers.BaseLayer{Payload: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 0}},
+	}
+	tcp2 := tcp1
+	tcp2.SrcPort, tcp2.DstPort = layers.TCPPort(3), layers.TCPPort(4)
+
+	tcp1.SetInternalPortsForTesting()
+	tcp2.SetInternalPortsForTesting()
+
+	simTime1 := time.Unix(0, 0)
+	simTime2 := simTime1.Add(time.Minute)
+	flushOlderThan := simTime2.Add(-1 * time.Second)
+	ctx1 := assemblerSimpleContext(gopacket.CaptureInfo{Timestamp: simTime1})
+	ctx2 := assemblerSimpleContext(gopacket.CaptureInfo{Timestamp: simTime2})
+
+	rounds := 3
+	a := NewAssembler(NewStreamPool(&testFactoryBench{}))
+
+	var before runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	for i := 0; i < rounds; i++ {
+		// we need to take all the free pages from pageCache
+		freeLen := (1 << uint32(i)) * initialAllocSize
+
+		for j := 0; j < freeLen/2; j++ {
+			// will get flushed with FlushWithOptions
+			a.AssembleWithContext(netFlow, &tcp1, &ctx1)
+			tcp1.Seq += 10 + 1
+		}
+
+		for j := 0; j < freeLen/2; j++ {
+			// will get flushed with FlushAll
+			a.AssembleWithContext(netFlow, &tcp2, &ctx2)
+			tcp2.Seq += 10 + 1
+		}
+	}
+
+	// this will mix up the pages in free list
+	a.FlushWithOptions(FlushOptions{T: flushOlderThan})
+	a.FlushAll()
+
+	// should shrink free list by about a half
+	a.pc.tryShrink()
+	runtime.GC()
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(a.pc.free)
+
+	log.Printf("Live/total ratio: %v%%\n",
+		100.0*float32(after.HeapAlloc-before.HeapAlloc)/float32(after.TotalAlloc-before.TotalAlloc))
 }
 
 /*

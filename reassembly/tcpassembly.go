@@ -1232,8 +1232,9 @@ func (a *Assembler) addNextFromConn(conn *halfconnection) {
 
 // FlushOptions provide options for flushing connections.
 type FlushOptions struct {
-	T  time.Time // If nonzero, only connections with data older than T are flushed
-	TC time.Time // If nonzero, only connections with data older than TC are closed (if no FIN/RST received)
+	T      time.Time         // If nonzero, only connections with data older than T are flushed
+	TC     time.Time         // If nonzero, only connections with data older than TC are closed (if no FIN/RST received)
+	Filter func(Stream) bool // If non nil, only connections for which Filter returns true ware flushed/closed
 }
 
 // FlushWithOptions finds any streams waiting for packets older than
@@ -1265,6 +1266,10 @@ func (a *Assembler) FlushWithOptions(opt FlushOptions) (flushed, closed int) {
 		remove := false
 		conn.mu.Lock()
 		for _, half := range []*halfconnection{&conn.s2c, &conn.c2s} {
+			if opt.Filter != nil && !opt.Filter(half.stream) {
+				continue
+			}
+
 			flushed, closed := a.flushClose(conn, half, opt.T, opt.TC)
 			if flushed {
 				flushes++
